@@ -1,0 +1,268 @@
+{
+  "name": "01 - Lead Capture & AI Response",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "lead-capture",
+        "responseMode": "onReceived"
+      },
+      "id": "webhook_trigger",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "table": "leads",
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "name": "={{ $json.body.name }}",
+            "email": "={{ $json.body.email }}",
+            "phone": "={{ $json.body.phone }}",
+            "entity_type": "={{ $json.body.entity_type }}",
+            "state": "={{ $json.body.state }}",
+            "message": "={{ $json.body.message }}",
+            "status": "new_inquiry",
+            "source": "website_contact"
+          }
+        }
+      },
+      "id": "create_lead_supabase",
+      "name": "Create Lead in Supabase",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [450, 300],
+      "credentials": {
+        "supabaseApi": {
+          "id": "1",
+          "name": "Supabase Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "contact",
+        "operation": "create",
+        "additionalFields": {
+          "properties": {
+            "firstname": "={{ $json.body.name.split(' ')[0] }}",
+            "lastname": "={{ $json.body.name.split(' ')[1] || '' }}",
+            "email": "={{ $json.body.email }}",
+            "phone": "={{ $json.body.phone }}",
+            "entity_type": "={{ $json.body.entity_type }}",
+            "state": "={{ $json.body.state }}",
+            "lifecyclestage": "lead"
+          }
+        }
+      },
+      "id": "sync_hubspot",
+      "name": "Sync to HubSpot CRM",
+      "type": "n8n-nodes-base.hubspot",
+      "typeVersion": 1,
+      "position": [650, 300],
+      "credentials": {
+        "hubspotApi": {
+          "id": "2",
+          "name": "HubSpot Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "HTTP-Referer",
+              "value": "https://aurumadvisement.com"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "model",
+              "value": "anthropic/claude-3.5-sonnet:beta"
+            },
+            {
+              "name": "route",
+              "value": "fallback"
+            },
+            {
+              "name": "messages",
+              "value": "=[\n  {\n    \"role\": \"system\",\n    \"content\": \"You are a business formation expert. Analyze this inquiry and generate a personalized response about entity formation. Include state-specific info, pricing, timeline, and next steps.\"\n  },\n  {\n    \"role\": \"user\",\n    \"content\": \"Customer {{ $json.body.name }} asked: {{ $json.body.message }}\\n\\nEntity Type: {{ $json.body.entity_type }}\\nState: {{ $json.body.state }}\\n\\nPricing: $297 base (includes 1 year RA), $697 Market Me, $997 Perfect Paydex, $1,647 Business 360. Generate detailed response.\"\n  }\n]"
+            }
+          ]
+        }
+      },
+      "id": "ai_response",
+      "name": "AI Generate Response",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [850, 300],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "3",
+          "name": "OpenRouter API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.stripe.com/v1/payment_links",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "line_items[0][price_data][currency]",
+              "value": "usd"
+            },
+            {
+              "name": "line_items[0][price_data][product_data][name]",
+              "value": "=Entity Formation - {{ $('create_lead_supabase').item.json.entity_type }} in {{ $('create_lead_supabase').item.json.state }}"
+            },
+            {
+              "name": "line_items[0][price_data][unit_amount]",
+              "value": "29700"
+            },
+            {
+              "name": "line_items[0][quantity]",
+              "value": "1"
+            },
+            {
+              "name": "metadata[lead_id]",
+              "value": "={{ $('create_lead_supabase').item.json.id }}"
+            },
+            {
+              "name": "metadata[client_email]",
+              "value": "={{ $('create_lead_supabase').item.json.email }}"
+            }
+          ]
+        }
+      },
+      "id": "create_payment_link",
+      "name": "Create Stripe Payment Link",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1050, 300],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "4",
+          "name": "Stripe API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "fromEmail": "noreply@aurumadvisement.com",
+        "toEmail": "={{ $('create_lead_supabase').item.json.email }}",
+        "subject": "Aurum Advisement - Your Entity Formation Information",
+        "emailType": "html",
+        "html": "=<div style='font-family: sans-serif; max-width: 600px;'>\n  <h2>{{ $('create_lead_supabase').item.json.name }}, here's your entity formation information</h2>\n  <div style='background: #f5f5f5; padding: 20px; border-radius: 8px;'>\n    {{ $('ai_response').item.json.choices[0].message.content }}\n  </div>\n  <div style='text-align: center; margin: 30px 0;'>\n    <a href='{{ $('create_payment_link').item.json.url }}' style='background: #070C6D; color: white; padding: 15px 40px; text-decoration: none; border-radius: 6px;'>Start Your Formation Now</a>\n  </div>\n</div>"
+      },
+      "id": "send_email",
+      "name": "Send Response Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2,
+      "position": [1250, 300],
+      "credentials": {
+        "smtp": {
+          "id": "5",
+          "name": "SMTP Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "table": "leads",
+        "filterType": "string",
+        "where": "id",
+        "value": "={{ $('create_lead_supabase').item.json.id }}",
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "status": "responded",
+            "payment_link": "={{ $('create_payment_link').item.json.url }}",
+            "responded_at": "={{ new Date().toISOString() }}"
+          }
+        }
+      },
+      "id": "update_lead_status",
+      "name": "Update Lead Status",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [1450, 300],
+      "credentials": {
+        "supabaseApi": {
+          "id": "1",
+          "name": "Supabase Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "table": "admin_alerts",
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "alert_type": "new_lead",
+            "severity": "low",
+            "title": "New Lead",
+            "message": "=New lead: {{ $('create_lead_supabase').item.json.name }} - {{ $('create_lead_supabase').item.json.entity_type }} in {{ $('create_lead_supabase').item.json.state }}"
+          }
+        }
+      },
+      "id": "create_admin_alert",
+      "name": "Create Admin Alert",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [1650, 300],
+      "credentials": {
+        "supabaseApi": {
+          "id": "1",
+          "name": "Supabase Account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [[{ "node": "Create Lead in Supabase", "type": "main", "index": 0 }]]
+    },
+    "Create Lead in Supabase": {
+      "main": [[{ "node": "Sync to HubSpot CRM", "type": "main", "index": 0 }]]
+    },
+    "Sync to HubSpot CRM": {
+      "main": [[{ "node": "AI Generate Response", "type": "main", "index": 0 }]]
+    },
+    "AI Generate Response": {
+      "main": [[{ "node": "Create Stripe Payment Link", "type": "main", "index": 0 }]]
+    },
+    "Create Stripe Payment Link": {
+      "main": [[{ "node": "Send Response Email", "type": "main", "index": 0 }]]
+    },
+    "Send Response Email": {
+      "main": [[{ "node": "Update Lead Status", "type": "main", "index": 0 }]]
+    },
+    "Update Lead Status": {
+      "main": [[{ "node": "Create Admin Alert", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {},
+  "staticData": null
+}
